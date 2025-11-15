@@ -1,0 +1,18 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+
+  - repo: https://github.com/psf/black
+    rev: 25.11.0
+    hooks:
+      - id: black
+
+  - repo: https://github.com/RobertCraigie/pyright-python
+    rev: v1.1.407
+    hooks:
+    - id: pyright
+      exclude: ^data/Q4RealBPP-DataGen\.py$
