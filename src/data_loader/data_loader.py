@@ -25,7 +25,7 @@ class Sample:
 
 class DataLoader:
     def __init__(
-        self, image_data_set_path: str, meta_data_path: str, label_info_path: str
+        self, image_data_set_path: str, meta_data_path: str, label_info_path: str, num_images: Optional[int] = None
     ) -> None:
         """Initializes the DataLoader with the given dataset path.
         Args:
@@ -37,6 +37,7 @@ class DataLoader:
         self.__image_data_set_path: str = image_data_set_path
         self.__meta_data_path: str = meta_data_path
         self.__label_info_path: str = label_info_path
+        self.__num_images = num_images
         data: Tuple[List[Sample], List[Sample]] = self.__load_data()
         self.__training_set: List[Sample] = data[0]
         self.__validation_set: List[Sample] = data[1]
@@ -82,9 +83,8 @@ class DataLoader:
         samples: List[Sample] = []
         logging.info(f"Loading image data from {self.__image_data_set_path}...")
 
-        for _, row in tqdm(
-            meta_data_df.iterrows(), total=len(meta_data_df), desc="Loading images"
-        ):
+        itereator = tqdm(meta_data_df.iterrows(), total=len(meta_data_df), desc="Loading images") if self.__num_images is None else tqdm(meta_data_df.head(self.__num_images).iterrows(), total=self.__num_images, desc="Loading images")
+        for _, row in itereator:
             img_path = os.path.join(self.__image_data_set_path, row["image_path"])
             if not os.path.exists(img_path):
                 logging.error(f"Image path {img_path} does not exist. Skipping...")
