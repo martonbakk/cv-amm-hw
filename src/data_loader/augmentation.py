@@ -1,11 +1,14 @@
 import logging
-from typing import Optional
+from typing import Optional, List
+from src.data_loader.data_loader import Sample
 import os
 from dataclasses import dataclass
 import numpy as np
 import sys
 import torch
 from PIL import Image
+import random
+from dataclasses import replace
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
@@ -105,5 +108,90 @@ class SnakeAugmentor:
         """
         return {
             "n_transforms": trial.suggest_int("n_transforms", 1, 4),
-            "magnitude": trial.suggest_int("magnitude", 5, 15)
+            "magnitude": trial.suggest_int("magnitude", 5, 20)
         }
+
+def augment_dataset(
+    train_data: List[Sample],
+    num_augmentations: int,
+    center_n_transforms: int,
+    center_magnitude: int,
+    seed: Optional[int] = None
+) -> List[Sample]:
+    """
+    Augments a dataset by generating new samples using RandAugment with parameters
+    sampled around specified center values. Returns combined original and augmented
+    samples in random order.
+    
+    Args:
+        train_data: Original list of Sample objects
+        num_augmentations: Number of new augmented samples to generate
+        center_n_transforms: Center value for RandAugment n_transforms parameter
+        center_magnitude: Center value for RandAugment magnitude parameter
+        seed: Random seed for reproducibility
+        
+    Returns:
+        Combined and shuffled list of original and augmented Sample objects
+    """
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed)
+    
+    if num_augmentations <= 0:
+        logging.info("No augmentations requested. Returning shuffled original data.")
+        combined = train_data.copy()
+        random.shuffle(combined)
+        return combined
+    
+    if not train_data:
+        logging.warning("Empty training data provided. Returning empty list.")
+        return []
+    
+    augmented_samples = []
+    for _ in range(num_augmentations):
+        # Randomly select a sample to augment
+        original_sample = random.choice(train_data)
+        
+        # Sample augmentation parameters around center values
+        rng = np.random.default_rng()
+        n_t = max(0, min(round(center_n_transforms + rng.normal(scale=center_n_transforms*0.5)), 10))
+        mag = max(0, min(round(center_magnitude + rng.normal(scale=center_magnitude*0.5)), 30))
+        
+        # Apply augmentation with error fallback
+        try:
+            augmented_image = SnakeAugmentor.randaugment(
+                image=original_sample.image.copy(),
+                n_transforms=int(n_t),
+                magnitude=int(mag),
+                seed=seed
+            )
+        except Exception as e:
+            logging.warning(f"Augmentation failed: {str(e)}. Using original image.")
+            augmented_image = original_sample.image.copy()
+        
+        # Create augmented sample with metadata
+        aug_info = {
+            **original_sample.info,
+            'augmented': True,
+            'aug_params': {
+                'n_transforms': n_t,
+                'magnitude': mag
+            }
+        }
+        
+        augmented_samples.append(
+            replace(
+                original_sample,
+                image=augmented_image,
+                predicted_class=None,
+                predicted_venomous=None,
+                info=aug_info
+            )
+        )
+    
+    # Combine and shuffle
+    combined = train_data + augmented_samples
+    random.shuffle(combined)
+    logging.info(f"Augmentation complete: {len(train_data)} original + "
+                 f"{len(augmented_samples)} augmented = {len(combined)} total samples")
+    return combined    
