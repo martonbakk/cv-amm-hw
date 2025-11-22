@@ -1,7 +1,7 @@
 DATA_SPLIT = 0.2
 CLASS_NUM = 296
 BATCH_SIZE = 32        # állítsd a GPU-d memóriájához (RTX 4090 → 64-96 is jó)
-NUM_WORKERS = 8
+NUM_WORKERS = 16
 
 # Fázisok learning rate-jei (ez a legjobb gyakorlattal egyezik)
 LR_HEADS    = 1e-3

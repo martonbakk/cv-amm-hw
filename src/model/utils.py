@@ -23,8 +23,12 @@ from src.config.configuration import (
 from src.data_loader.data_loader import DataLoader                  
 from src.model.model import TwoHeadConvNeXtV2
 
+# Define device globally for consistency
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+logging.info(f"Using device: {DEVICE}")
 
 class Collate:
+    """Collate function that keeps all tensors on CPU during data loading"""
     def __init__(self, image_root: str):
         self.image_root = image_root
 
@@ -32,7 +36,6 @@ class Collate:
         images = []
         venomous_labels = []
         species_labels = []
-        DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         for sample in batch:
             img_path = sample.info.get("image_path")
@@ -46,23 +49,21 @@ class Collate:
             venomous_labels.append(1.0 if sample.original_venomous else 0.0)
             species_labels.append(sample.original_class)
 
+        # Create tensors on CPU only - critical for pinned memory
         return (
-            torch.stack(images),
-            torch.tensor(venomous_labels, dtype=torch.float32, device=DEVICE),
-            torch.tensor(species_labels,   dtype=torch.long,   device=DEVICE),
+            torch.stack(images),  # CPU tensor
+            torch.tensor(venomous_labels, dtype=torch.float32),  # CPU tensor
+            torch.tensor(species_labels, dtype=torch.long),     # CPU tensor
         )
-
-# Használat:
-collate_fn = Collate(IMAGE_ROOT)
 
 def create_torch_loader(samples, batch_size, shuffle):
     return TorchDataLoader(
         samples,
         batch_size=batch_size,
         shuffle=shuffle,
-        num_workers=NUM_WORKERS,      # most már lehet 8 vagy több is!
-        pin_memory=True,
-        collate_fn=collate_fn,        # ← ez már pickle-elhető
+        num_workers=NUM_WORKERS,
+        pin_memory=True,  # Enable pinned memory for faster GPU transfer
+        collate_fn=Collate(IMAGE_ROOT),
     )
 
 def binary_accuracy(logits: torch.Tensor, targets: torch.Tensor) -> float:
@@ -73,20 +74,19 @@ def species_accuracy(logits: torch.Tensor, targets: torch.Tensor) -> float:
     preds = logits.argmax(dim=1)
     return (preds == targets).float().mean().item() * 100
 
-
-
 def train_model(data_loader: DataLoader, model: TwoHeadConvNeXtV2):
-
+    # Move model to GPU immediately
+    model = model.to(DEVICE)
+    
     train_samples = data_loader.get_training_set()
-    val_samples   = data_loader.get_validation_set()
+    val_samples = data_loader.get_validation_set()
 
     train_loader = create_torch_loader(train_samples, BATCH_SIZE, shuffle=True)
-    val_loader   = create_torch_loader(val_samples,   BATCH_SIZE, shuffle=False)
+    val_loader = create_torch_loader(val_samples, BATCH_SIZE, shuffle=False)
 
-    # Lossok
+    # Loss functions
     criterion_bin = nn.BCEWithLogitsLoss()
-    criterion_sp  = nn.CrossEntropyLoss(label_smoothing=0.05)
-
+    criterion_sp = nn.CrossEntropyLoss(label_smoothing=0.05)
 
     logging.info("1. FÁZIS: Csak a fejek edzése (backbone fagyasztva)")
     model.freeze_backbone()
@@ -102,10 +102,14 @@ def train_model(data_loader: DataLoader, model: TwoHeadConvNeXtV2):
         model.train()
         epoch_loss = 0.0
         for imgs, ven_lbl, sp_lbl in tqdm(train_loader, desc=f"Phase1 Epoch {epoch}"):
-            bin_logit, sp_logit = model(imgs)
+            # Move batch to GPU
+            imgs = imgs.to(DEVICE, non_blocking=True)
+            ven_lbl = ven_lbl.to(DEVICE, non_blocking=True)
+            sp_lbl = sp_lbl.to(DEVICE, non_blocking=True)
 
-            loss_bin = criterion_bin(bin_logit, ven_lbl)
-            loss_sp  = criterion_sp(sp_logit, sp_lbl)
+            bin_logit, sp_logit = model(imgs)
+            loss_bin = criterion_bin(bin_logit.squeeze(), ven_lbl)
+            loss_sp = criterion_sp(sp_logit, sp_lbl)
             loss = loss_bin + loss_sp
 
             optimizer_heads.zero_grad()
@@ -114,7 +118,7 @@ def train_model(data_loader: DataLoader, model: TwoHeadConvNeXtV2):
 
             epoch_loss += loss.item()
 
-        # Validáció
+        # Validation
         val_loss, val_bin_acc, val_sp_acc = validate(model, val_loader, criterion_bin, criterion_sp)
         scheduler_heads.step(val_loss)
 
@@ -123,13 +127,12 @@ def train_model(data_loader: DataLoader, model: TwoHeadConvNeXtV2):
 
         torch.save(model.state_dict(), f"snake_phase1_epoch{epoch}.pth")
 
-
     logging.info("=== 2. FÁZIS: Teljes modell finetuning ===")
     model.unfreeze_backbone()
 
     optimizer_full = optim.AdamW([
-        {"params": model.backbone.parameters(),     "lr": LR_BACKBONE},
-        {"params": model.binary_head.parameters(),  "lr": LR_HEADS * 0.1},
+        {"params": model.backbone.parameters(), "lr": LR_BACKBONE},
+        {"params": model.binary_head.parameters(), "lr": LR_HEADS * 0.1},
         {"params": model.species_head.parameters(), "lr": LR_HEADS * 0.1},
     ], weight_decay=WEIGHT_DECAY)
 
@@ -140,10 +143,14 @@ def train_model(data_loader: DataLoader, model: TwoHeadConvNeXtV2):
         model.train()
         epoch_loss = 0.0
         for imgs, ven_lbl, sp_lbl in tqdm(train_loader, desc=f"Phase2 Epoch {epoch}"):
-            bin_logit, sp_logit = model(imgs)
+            # Move batch to GPU
+            imgs = imgs.to(DEVICE, non_blocking=True)
+            ven_lbl = ven_lbl.to(DEVICE, non_blocking=True)
+            sp_lbl = sp_lbl.to(DEVICE, non_blocking=True)
 
-            loss_bin = criterion_bin(bin_logit, ven_lbl)
-            loss_sp  = criterion_sp(sp_logit, sp_lbl)
+            bin_logit, sp_logit = model(imgs)
+            loss_bin = criterion_bin(bin_logit.squeeze(), ven_lbl)
+            loss_sp = criterion_sp(sp_logit, sp_lbl)
             loss = loss_bin + loss_sp
 
             optimizer_full.zero_grad()
@@ -165,23 +172,27 @@ def train_model(data_loader: DataLoader, model: TwoHeadConvNeXtV2):
 
     logging.info("Tanítás kész! Legjobb modell: snake_best_full.pth")
 
-
+@torch.no_grad()
 def validate(model, val_loader, crit_bin, crit_sp):
     model.eval()
     total_loss = 0.0
     bin_acc = sp_acc = 0.0
-    with torch.no_grad():
-        for imgs, ven_lbl, sp_lbl in val_loader:
-            bin_logit, sp_logit = model(imgs)
+    
+    for imgs, ven_lbl, sp_lbl in val_loader:
+        # Move batch to GPU
+        imgs = imgs.to(DEVICE, non_blocking=True)
+        ven_lbl = ven_lbl.to(DEVICE, non_blocking=True)
+        sp_lbl = sp_lbl.to(DEVICE, non_blocking=True)
 
-            loss_bin = crit_bin(bin_logit, ven_lbl)
-            loss_sp  = crit_sp(sp_logit, sp_lbl)
-            loss = loss_bin + loss_sp
-            total_loss += loss.item()
+        bin_logit, sp_logit = model(imgs)
+        loss_bin = crit_bin(bin_logit.squeeze(), ven_lbl)
+        loss_sp = crit_sp(sp_logit, sp_lbl)
+        loss = loss_bin + loss_sp
+        total_loss += loss.item()
 
-            bin_acc += binary_accuracy(bin_logit, ven_lbl)
-            sp_acc  += species_accuracy(sp_logit, sp_lbl)
+        bin_acc += binary_accuracy(bin_logit, ven_lbl)
+        sp_acc += species_accuracy(sp_logit, sp_lbl)
 
     return (total_loss / len(val_loader),
             bin_acc / len(val_loader),
-            sp_acc  / len(val_loader))
+            sp_acc / len(val_loader))
