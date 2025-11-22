@@ -6,6 +6,11 @@ from torch.utils.data import DataLoader as TorchDataLoader
 import logging
 from tqdm import tqdm
 import os, sys
+import random
+import numpy as np
+from src.data_loader.data_loader import ListDataset, Sample, basic_transform
+from src.data_loader.augmentation import SnakeAugmentor
+from PIL import Image
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
@@ -28,7 +33,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 logging.info(f"Using device: {DEVICE}")
 
 class Collate:
-    """Collate function that keeps all tensors on CPU during data loading"""
+    """Collate function that handles on-demand augmentation without caching"""
     def __init__(self, image_root: str):
         self.image_root = image_root
 
@@ -38,22 +43,45 @@ class Collate:
         species_labels = []
 
         for sample in batch:
-            img_path = sample.info.get("image_path")
-            if img_path is None:
-                raise ValueError("image_path nem található a Sample.info-ban!")
-            
-            full_path = os.path.join(self.image_root, img_path)
-            img = DataLoader.load_image(full_path)
-            images.append(img)
+            if sample.info.get('augmented', False):
+                # Get source image path directly from metadata
+                source_img_path = sample.info['aug_params']['source_image_path']
+                full_path = os.path.join(self.image_root, source_img_path)
+                
+                # Load source image ON DEMAND
+                img = Image.open(full_path).convert("RGB")
+                img_np = np.array(img)
+                
+                # Apply augmentation
+                try:
+                    augmented_img = SnakeAugmentor.randaugment(
+                        image=img_np,
+                        n_transforms=sample.info['aug_params']['n_transforms'],
+                        magnitude=sample.info['aug_params']['magnitude']
+                    )
+                    img = Image.fromarray(augmented_img)
+                except Exception as e:
+                    logging.info(f"Augmentation failed: {str(e)}. Using original.")
+                    print("Augmentation failed, using original image.")
+                finally:
+                    img = basic_transform(img)
+            else:
+                # Regular sample - load normally
+                img_path = sample.info.get("image_path")
+                if img_path is None:
+                    raise ValueError("image_path nem található a Sample.info-ban!")
+                full_path = os.path.join(self.image_root, img_path)
+                img = DataLoader.load_image(full_path)
 
+            
+            images.append(img)
             venomous_labels.append(1.0 if sample.original_venomous else 0.0)
             species_labels.append(sample.original_class)
 
-        # Create tensors on CPU only - critical for pinned memory
         return (
-            torch.stack(images),  # CPU tensor
-            torch.tensor(venomous_labels, dtype=torch.float32),  # CPU tensor
-            torch.tensor(species_labels, dtype=torch.long),     # CPU tensor
+            torch.stack(images),
+            torch.tensor(venomous_labels, dtype=torch.float32),
+            torch.tensor(species_labels, dtype=torch.long),
         )
 
 def create_torch_loader(samples, batch_size, shuffle):
@@ -74,12 +102,52 @@ def species_accuracy(logits: torch.Tensor, targets: torch.Tensor) -> float:
     preds = logits.argmax(dim=1)
     return (preds == targets).float().mean().item() * 100
 
-def train_model(data_loader: DataLoader, model: TwoHeadConvNeXtV2):
+def train_model(data_loader: DataLoader, model: TwoHeadConvNeXtV2, augmentor=None):
     # Move model to GPU immediately
     model = model.to(DEVICE)
     
     train_samples = data_loader.get_training_set()
     val_samples = data_loader.get_validation_set()
+
+    if augmentor is not None:
+        augmented_samples = []
+        for _ in range(augmentor.num_augmentations):
+            # Randomly select a source sample
+            source_sample = random.choice(train_samples)
+            
+            # Sample augmentation parameters
+            rng = np.random.default_rng()
+            n_t = max(0, min(round(augmentor.center_n_transforms + rng.normal(scale=augmentor.center_n_transforms*0.5)), 10))
+            mag = max(0, min(round(augmentor.center_magnitude + rng.normal(scale=augmentor.center_magnitude*0.5)), 30))
+            
+            # Create augmented sample metadata
+            aug_info = {
+                **source_sample.info,
+                'augmented': True,
+                'aug_params': {
+                    'n_transforms': n_t,
+                    'magnitude': mag,
+                    # CRITICAL: Store source image path directly
+                    'source_image_path': source_sample.info['image_path']
+                }
+            }
+            
+            augmented_samples.append(
+                Sample(
+                    original_class=source_sample.original_class,
+                    original_venomous=source_sample.original_venomous,
+                    predicted_class=None,
+                    predicted_venomous=None,
+                    image=None,
+                    info=aug_info
+                )
+            )
+        
+        # Combine and shuffle
+        combined_samples = list(train_samples) + augmented_samples
+        random.shuffle(combined_samples)
+        train_samples = ListDataset(combined_samples)
+        logging.info(f"Created {len(augmented_samples)} virtual augmented samples")
 
     train_loader = create_torch_loader(train_samples, BATCH_SIZE, shuffle=True)
     val_loader = create_torch_loader(val_samples, BATCH_SIZE, shuffle=False)
