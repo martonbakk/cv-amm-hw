@@ -1,16 +1,31 @@
 import logging
+import random
 from typing import Dict, List, Optional, Tuple
 from PIL import Image
-import os
 from tqdm import tqdm
 from dataclasses import dataclass
 import pandas as pd
 import numpy as np
 import sys, os
+import torch as th
+import logging
+from torchvision import transforms
+from sklearn.model_selection import train_test_split
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from src.config.configuration import DATA_SPLIT
+
+
+normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                 std=[0.229, 0.224, 0.225])
+
+# Egyszerű átméretezés 224×224-re + ToTensor + normalizálás (train és val ugyanaz!)
+basic_transform = transforms.Compose([
+    transforms.Resize((224, 224)),   # ConvNeXtV2 224×224-et vár
+    transforms.ToTensor(),          # [H, W, C] → [C, H, W] + 0-1 float
+    normalize,                       # ImageNet statok
+])
 
 
 @dataclass
@@ -19,9 +34,24 @@ class Sample:
     original_venomous: bool
     predicted_class: Optional[int]
     predicted_venomous: Optional[bool]
-    image: np.ndarray
+    image: Optional[th.Tensor]
     info: Dict
 
+class ListDataset(th.utils.data.Dataset):
+    """Small wrapper to present a plain list as a torch Dataset for type-checkers."""
+    def __init__(self, items):
+        # ensure we have a concrete list (None handled by caller)
+        self.__items = list(items)
+
+    def __len__(self):
+        return len(self.__items)
+
+    def __getitem__(self, idx):
+        return self.__items[idx]
+    
+    @property
+    def items(self):
+        return self.__items
 
 class DataLoader:
     def __init__(
@@ -37,11 +67,25 @@ class DataLoader:
         self.__image_data_set_path: str = image_data_set_path
         self.__meta_data_path: str = meta_data_path
         self.__label_info_path: str = label_info_path
-        data: Tuple[List[Sample], List[Sample]] = self.__load_data()
-        self.__training_set: List[Sample] = data[0]
-        self.__validation_set: List[Sample] = data[1]
+        all_samples: ListDataset = self.__load_data()
+        
+        unique_old_ids = sorted(set(s.original_class for s in all_samples))
+        old_to_new = {old: new for new, old in enumerate(unique_old_ids)}
 
-    def __load_data(self) -> Tuple[List[Sample], List[Sample]]:
+        for sample in all_samples:
+            sample.original_class = old_to_new[sample.original_class] # pyright: ignore[reportAttributeAccessIssue]
+
+        random.Random(42).shuffle(all_samples.items)
+        labels_for_stratify = [s.original_class for s in all_samples]
+        train_samples, val_samples = train_test_split(
+            all_samples, test_size=DATA_SPLIT, stratify=labels_for_stratify, random_state=42
+        )
+        logging.info(f"Train: {len(train_samples)}, Val: {len(val_samples)}")
+
+        self.__training_set: ListDataset = train_samples
+        self.__validation_set: ListDataset = val_samples
+
+    def __load_data(self) -> ListDataset:
         """Loads the dataset from the specified path.
         Returns:
             Tuple[List[Sample], List[Sample]]: A tuple containing the training and validation datasets.
@@ -83,7 +127,7 @@ class DataLoader:
         logging.info(f"Loading image data from {self.__image_data_set_path}...")
 
         for _, row in tqdm(
-            meta_data_df.iterrows(), total=len(meta_data_df), desc="Loading images"
+            meta_data_df.iterrows(), total=len(meta_data_df), desc="Loading metadata"
         ):
             img_path = os.path.join(self.__image_data_set_path, row["image_path"])
             if not os.path.exists(img_path):
@@ -93,9 +137,6 @@ class DataLoader:
             original_class: str = row["class_id"]
             original_venomous: bool = bool(row["MIVS"])
             info = row.to_dict().copy()
-            img = Image.open(img_path).convert("RGB")
-
-            img = np.array(img)
 
             samples.append(
                 Sample(
@@ -103,29 +144,20 @@ class DataLoader:
                     original_venomous=original_venomous,
                     predicted_class=None,
                     predicted_venomous=None,
-                    image=img,
+                    image=None,
                     info=info,
                 )
             )
-        return self.__split_data(samples)
+        return ListDataset(samples)
 
-    def __split_data(
-        self, samples: List[Sample], validation_split: float = DATA_SPLIT
-    ) -> Tuple[List[Sample], List[Sample]]:
-        """Splits the dataset into training and validation sets.
-        Args:
-            samples (List[Sample]): The list of samples to split.
-            validation_split (float, optional): The proportion of the dataset to include in the validation split. Defaults to 0.2.
-        Returns:
-            Tuple[List[Sample], List[Sample]]: A tuple containing the training and validation datasets.
-        """
-        split_index = int(len(samples) * (1 - validation_split))
-        training_set = samples[:split_index]
-        validation_set = samples[split_index:]
-        return (training_set, validation_set)
-
-    def get_training_set(self) -> Optional[List[Sample]]:
+    def get_training_set(self) -> Optional[ListDataset]:
         return self.__training_set
 
-    def get_validation_set(self) -> Optional[List[Sample]]:
+    def get_validation_set(self) -> Optional[ListDataset]:
         return self.__validation_set
+    
+    @staticmethod
+    def load_image(image_path: str) -> th.Tensor:
+        img = Image.open(image_path).convert("RGB")
+        img = basic_transform(img)          # csak resize + ToTensor + normalize
+        return img
