@@ -11,6 +11,8 @@ import numpy as np
 from src.data_loader.data_loader import ListDataset, Sample, basic_transform
 from src.data_loader.augmentation import SnakeAugmentor
 from PIL import Image
+import optuna
+from optuna.trial import Trial
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
@@ -102,7 +104,18 @@ def species_accuracy(logits: torch.Tensor, targets: torch.Tensor) -> float:
     preds = logits.argmax(dim=1)
     return (preds == targets).float().mean().item() * 100
 
-def train_model(data_loader: DataLoader, model: TwoHeadConvNeXtV2, augmentor=None):
+def train_model(
+    data_loader: DataLoader,
+    model: TwoHeadConvNeXtV2,
+    augmentor=None,
+    lr_heads=LR_HEADS,
+    lr_backbone=LR_BACKBONE,
+    weight_decay=WEIGHT_DECAY,
+    epochs_phase1=EPOCHS_PHASE1,
+    epochs_phase2=EPOCHS_PHASE2,
+    save_models=True,
+    trial: Trial = None
+):
     # Move model to GPU immediately
     model = model.to(DEVICE)
     
@@ -161,12 +174,12 @@ def train_model(data_loader: DataLoader, model: TwoHeadConvNeXtV2, augmentor=Non
 
     optimizer_heads = optim.AdamW(
         list(model.binary_head.parameters()) + list(model.species_head.parameters()),
-        lr=LR_HEADS,
-        weight_decay=WEIGHT_DECAY,
+        lr=lr_heads,
+        weight_decay=weight_decay,
     )
     scheduler_heads = optim.lr_scheduler.ReduceLROnPlateau(optimizer_heads, patience=3, factor=0.5)
 
-    for epoch in range(1, EPOCHS_PHASE1 + 1):
+    for epoch in range(1, epochs_phase1 + 1):
         model.train()
         epoch_loss = 0.0
         for imgs, ven_lbl, sp_lbl in tqdm(train_loader, desc=f"Phase1 Epoch {epoch}"):
@@ -199,15 +212,15 @@ def train_model(data_loader: DataLoader, model: TwoHeadConvNeXtV2, augmentor=Non
     model.unfreeze_backbone()
 
     optimizer_full = optim.AdamW([
-        {"params": model.backbone.parameters(), "lr": LR_BACKBONE},
-        {"params": model.binary_head.parameters(), "lr": LR_HEADS * 0.1},
-        {"params": model.species_head.parameters(), "lr": LR_HEADS * 0.1},
-    ], weight_decay=WEIGHT_DECAY)
+        {"params": model.backbone.parameters(), "lr": lr_backbone},
+        {"params": model.binary_head.parameters(), "lr": lr_heads * 0.1},
+        {"params": model.species_head.parameters(), "lr": lr_heads * 0.1},
+    ], weight_decay=weight_decay)
 
-    scheduler_full = optim.lr_scheduler.CosineAnnealingLR(optimizer_full, T_max=EPOCHS_PHASE2)
+    scheduler_full = optim.lr_scheduler.CosineAnnealingLR(optimizer_full, T_max=epochs_phase2)
 
     best_val_loss = float("inf")
-    for epoch in range(1, EPOCHS_PHASE2 + 1):
+    for epoch in range(1, epochs_phase2 + 1):
         model.train()
         epoch_loss = 0.0
         for imgs, ven_lbl, sp_lbl in tqdm(train_loader, desc=f"Phase2 Epoch {epoch}"):
@@ -235,10 +248,16 @@ def train_model(data_loader: DataLoader, model: TwoHeadConvNeXtV2, augmentor=Non
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save(model.state_dict(), "snake_best_full.pth")
-            logging.info("   Új legjobb modell mentve!")
-
+            if save_models:
+                torch.save(model.state_dict(), "snake_best_full.pth")
+                logging.info("   Új legjobb modell mentve!")
+        if trial:
+            trial.report(val_loss, epochs_phase1 + epoch)
+            if trial.should_prune():
+                raise optuna.TrialPruned()
     logging.info("Tanítás kész! Legjobb modell: snake_best_full.pth")
+    return best_val_loss
+    
 
 @torch.no_grad()
 def validate(model, val_loader, crit_bin, crit_sp):

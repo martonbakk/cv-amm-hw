@@ -1,6 +1,6 @@
 DATA_SPLIT = 0.2
 CLASS_NUM = 296
-BATCH_SIZE = 32        # állítsd a GPU-d memóriájához (RTX 4090 → 64-96 is jó)
+BATCH_SIZE = 256        # állítsd a GPU-d memóriájához (RTX 4090 → 64-96 is jó)
 NUM_WORKERS = 2
 
 # Fázisok learning rate-jei (ez a legjobb gyakorlattal egyezik)
@@ -10,6 +10,8 @@ WEIGHT_DECAY = 0.05
 
 EPOCHS_PHASE1 = 15   # csak a két fej tanul (backbone fagyasztva)
 EPOCHS_PHASE2 = 30   # teljes modell finetuning
+
+NUM_AUGMENTATIONS = 50000  # teljes augmentált mintaszám a training készletben
 
 IMAGE_ROOT     = "data/train_images_small"      # <-- IDE ÍRD A VALÓDI ÚTVONALAT
 META_CSV       = "data/train_images_metadata2.csv"
