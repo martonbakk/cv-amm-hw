@@ -55,7 +55,7 @@ class ListDataset(th.utils.data.Dataset):
 
 class DataLoader:
     def __init__(
-        self, image_data_set_path: str, meta_data_path: str, label_info_path: str, num_images: Optional[int] = None
+        self, image_data_set_path: str, meta_data_path: str, label_info_path: str
     ) -> None:
         """Initializes the DataLoader with the given dataset path.
         Args:
