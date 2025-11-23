@@ -1,6 +1,8 @@
 # train_snake.py
+from typing import Optional
 import torch
 import torch.nn as nn
+from typing import Optional
 import torch.optim as optim
 from torch.utils.data import DataLoader as TorchDataLoader
 import logging
@@ -9,7 +11,7 @@ import os, sys
 import random
 import numpy as np
 from src.data_loader.data_loader import ListDataset, Sample, basic_transform
-from src.data_loader.augmentation import SnakeAugmentor
+from src.data_loader.augmentation import SnakeAugmentor, Augmentor
 from PIL import Image
 import optuna
 from optuna.trial import Trial
@@ -24,15 +26,13 @@ from src.config.configuration import (
     LR_BACKBONE, 
     LR_HEADS,
     BATCH_SIZE,
-    WEIGHT_DECAY
+    WEIGHT_DECAY,
+    LABEL_SMOOTHING
     )
 
 from src.data_loader.data_loader import DataLoader                  
 from src.model.model import TwoHeadConvNeXtV2
 
-# Define device globally for consistency
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-logging.info(f"Using device: {DEVICE}")
 
 class Collate:
     """Collate function that handles on-demand augmentation without caching"""
@@ -52,24 +52,24 @@ class Collate:
                 
                 # Load source image ON DEMAND
                 img = Image.open(full_path).convert("RGB")
-                img_np = np.array(img)
                 
                 # Apply augmentation
                 try:
                     augmented_img = SnakeAugmentor.randaugment(
-                        image=img_np,
-                        n_transforms=sample.info['aug_params']['n_transforms'],
-                        magnitude=sample.info['aug_params']['magnitude']
+                        image=img,
+                        n_transforms=sample.info.get('aug_params', {}).get('n_transforms', 2),
+                        magnitude=sample.info.get('aug_params', {}).get('magnitude', 10)
+
                     )
-                    img = Image.fromarray(augmented_img)
                 except Exception as e:
                     logging.info(f"Augmentation failed: {str(e)}. Using original.")
                     print("Augmentation failed, using original image.")
                 finally:
-                    img = basic_transform(img)
+                    img = basic_transform(augmented_img)
             else:
                 # Regular sample - load normally
-                img_path = sample.info.get("image_path")
+                img_path = sample.info.get("image_path", None)
+
                 if img_path is None:
                     raise ValueError("image_path nem található a Sample.info-ban!")
                 full_path = os.path.join(self.image_root, img_path)
@@ -77,7 +77,7 @@ class Collate:
 
             
             images.append(img)
-            venomous_labels.append(1.0 if sample.original_venomous else 0.0)
+            venomous_labels.append(sample.original_venomous)
             species_labels.append(sample.original_class)
 
         return (
@@ -86,7 +86,7 @@ class Collate:
             torch.tensor(species_labels, dtype=torch.long),
         )
 
-def create_torch_loader(samples, batch_size, shuffle):
+def create_torch_loader(samples, batch_size, shuffle) -> TorchDataLoader:
     return TorchDataLoader(
         samples,
         batch_size=batch_size,
@@ -107,20 +107,19 @@ def species_accuracy(logits: torch.Tensor, targets: torch.Tensor) -> float:
 def train_model(
     data_loader: DataLoader,
     model: TwoHeadConvNeXtV2,
-    augmentor=None,
-    lr_heads=LR_HEADS,
-    lr_backbone=LR_BACKBONE,
-    weight_decay=WEIGHT_DECAY,
-    epochs_phase1=EPOCHS_PHASE1,
-    epochs_phase2=EPOCHS_PHASE2,
-    save_models=True,
-    trial: Trial = None
+    augmentor: Optional[Augmentor] = None,
+    lr_heads: float = LR_HEADS,
+    lr_backbone: float = LR_BACKBONE,
+    weight_decay: float = WEIGHT_DECAY,
+    label_smoothing: float = LABEL_SMOOTHING,
+    epochs_phase1: int =EPOCHS_PHASE1,
+    epochs_phase2: int =EPOCHS_PHASE2,
+    save_models: bool =True,
+    trial: Optional[Trial] = None
 ):
-    # Move model to GPU immediately
-    model = model.to(DEVICE)
     
-    train_samples = data_loader.get_training_set()
-    val_samples = data_loader.get_validation_set()
+    train_samples: ListDataset = data_loader.get_training_set()
+    val_samples: ListDataset = data_loader.get_validation_set()
 
     if augmentor is not None:
         augmented_samples = []
@@ -151,7 +150,6 @@ def train_model(
                     original_venomous=source_sample.original_venomous,
                     predicted_class=None,
                     predicted_venomous=None,
-                    image=None,
                     info=aug_info
                 )
             )
@@ -162,12 +160,17 @@ def train_model(
         train_samples = ListDataset(combined_samples)
         logging.info(f"Created {len(augmented_samples)} virtual augmented samples")
 
-    train_loader = create_torch_loader(train_samples, BATCH_SIZE, shuffle=True)
-    val_loader = create_torch_loader(val_samples, BATCH_SIZE, shuffle=False)
+    # Subsample if optuna is running the function
+    if trial is not None:
+        train_samples = ListDataset(train_samples[:10000])
+        val_samples = ListDataset(val_samples[:2000])
+        logging.info("Optuna tuning: Using reduced dataset for faster training")
 
-    # Loss functions
+    train_loader: TorchDataLoader = create_torch_loader(train_samples, BATCH_SIZE, shuffle=True)
+    val_loader: TorchDataLoader = create_torch_loader(val_samples, BATCH_SIZE, shuffle=False)
+
     criterion_bin = nn.BCEWithLogitsLoss()
-    criterion_sp = nn.CrossEntropyLoss(label_smoothing=0.05)
+    criterion_sp = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
 
     logging.info("1. FÁZIS: Csak a fejek edzése (backbone fagyasztva)")
     model.freeze_backbone()
@@ -179,23 +182,28 @@ def train_model(
     )
     scheduler_heads = optim.lr_scheduler.ReduceLROnPlateau(optimizer_heads, patience=3, factor=0.5)
 
+    # define gradient scaler for mixed precision
+    scaler = torch.GradScaler()
+
     for epoch in range(1, epochs_phase1 + 1):
         model.train()
         epoch_loss = 0.0
         for imgs, ven_lbl, sp_lbl in tqdm(train_loader, desc=f"Phase1 Epoch {epoch}"):
             # Move batch to GPU
-            imgs = imgs.to(DEVICE, non_blocking=True)
-            ven_lbl = ven_lbl.to(DEVICE, non_blocking=True)
-            sp_lbl = sp_lbl.to(DEVICE, non_blocking=True)
-
-            bin_logit, sp_logit = model(imgs)
-            loss_bin = criterion_bin(bin_logit.squeeze(), ven_lbl)
-            loss_sp = criterion_sp(sp_logit, sp_lbl)
-            loss = loss_bin + loss_sp
+            imgs = imgs.to(model.device, non_blocking=True)
+            ven_lbl = ven_lbl.to(model.device, non_blocking=True)
+            sp_lbl = sp_lbl.to(model.device, non_blocking=True)
 
             optimizer_heads.zero_grad()
-            loss.backward()
-            optimizer_heads.step()
+            with torch.autocast(device_type=model.device.type):
+                bin_logit, sp_logit = model(imgs)
+                loss_bin = criterion_bin(bin_logit.squeeze(), ven_lbl)
+                loss_sp = criterion_sp(sp_logit, sp_lbl)
+                loss = loss_bin + loss_sp
+                
+            scaler.scale(loss).backward()
+            scaler.step(optimizer_heads)
+            scaler.update()
 
             epoch_loss += loss.item()
 
@@ -225,18 +233,19 @@ def train_model(
         epoch_loss = 0.0
         for imgs, ven_lbl, sp_lbl in tqdm(train_loader, desc=f"Phase2 Epoch {epoch}"):
             # Move batch to GPU
-            imgs = imgs.to(DEVICE, non_blocking=True)
-            ven_lbl = ven_lbl.to(DEVICE, non_blocking=True)
-            sp_lbl = sp_lbl.to(DEVICE, non_blocking=True)
-
-            bin_logit, sp_logit = model(imgs)
-            loss_bin = criterion_bin(bin_logit.squeeze(), ven_lbl)
-            loss_sp = criterion_sp(sp_logit, sp_lbl)
-            loss = loss_bin + loss_sp
+            imgs = imgs.to(model.device, non_blocking=True)
+            ven_lbl = ven_lbl.to(model.device, non_blocking=True)
+            sp_lbl = sp_lbl.to(model.device, non_blocking=True)
 
             optimizer_full.zero_grad()
-            loss.backward()
-            optimizer_full.step()
+            with torch.autocast(device_type=model.device.type):
+                bin_logit, sp_logit = model(imgs)
+                loss_bin = criterion_bin(bin_logit.squeeze(), ven_lbl)
+                loss_sp = criterion_sp(sp_logit, sp_lbl)
+                loss = loss_bin + loss_sp
+            scaler.scale(loss).backward()
+            scaler.step(optimizer_full)
+            scaler.update()
 
             epoch_loss += loss.item()
 
@@ -264,17 +273,21 @@ def validate(model, val_loader, crit_bin, crit_sp):
     model.eval()
     total_loss = 0.0
     bin_acc = sp_acc = 0.0
-    
     for imgs, ven_lbl, sp_lbl in val_loader:
         # Move batch to GPU
-        imgs = imgs.to(DEVICE, non_blocking=True)
-        ven_lbl = ven_lbl.to(DEVICE, non_blocking=True)
-        sp_lbl = sp_lbl.to(DEVICE, non_blocking=True)
+        imgs = imgs.to(model.device, non_blocking=True)
+        ven_lbl = ven_lbl.to(model.device, non_blocking=True)
+        sp_lbl = sp_lbl.to(model.device, non_blocking=True)
 
-        bin_logit, sp_logit = model(imgs)
-        loss_bin = crit_bin(bin_logit.squeeze(), ven_lbl)
-        loss_sp = crit_sp(sp_logit, sp_lbl)
-        loss = loss_bin + loss_sp
+        with torch.autocast(device_type=model.device.type):
+            bin_logit, sp_logit = model(imgs)
+            loss_bin = crit_bin(bin_logit.squeeze(), ven_lbl)
+            loss_sp = crit_sp(sp_logit, sp_lbl)
+            loss = loss_bin + loss_sp
+        # Cast logits to FP32 for accurate metrics
+        bin_logit = bin_logit.float()
+        sp_logit = sp_logit.float()
+        
         total_loss += loss.item()
 
         bin_acc += binary_accuracy(bin_logit, ven_lbl)

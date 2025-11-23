@@ -3,21 +3,7 @@ import torch
 import torch.nn as nn
 from src.config.configuration import CLASS_NUM
 import timm
-import logging
-
-
-class BackboneOnly(nn.Module):
-    def __init__(self, backbone: nn.Module):
-        super().__init__()
-        logging.info("Creating BackboneOnly model.")
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        logging.info(f"BackBone using device: {self.device}")
-
-        self.backbone: nn.Module = backbone.to(self.device)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.backbone(x).to(self.device)
-            
+import logging       
 
 class TwoHeadConvNeXtV2(nn.Module):
     """ConvNeXt V2 backbone + classification heads (binary + multi-class)
@@ -36,10 +22,10 @@ class TwoHeadConvNeXtV2(nn.Module):
         # timm model with num_classes=0 returns a model whose forward gives feature vector
         # some timm versions support features_only=True; here we use num_classes=0 and get out_features
         self.__backbone: nn.Module = timm.create_model(
-            backbone_name, 
-            pretrained=pretrained, 
-            num_classes=0,
-            drop_path_rate=0.1,
+                backbone_name, 
+                pretrained=pretrained, 
+                num_classes=0,
+                drop_path_rate=0.1,
             )
         self.__backbone.to(self.device)
         
@@ -85,7 +71,7 @@ class TwoHeadConvNeXtV2(nn.Module):
 
     @property
     def backbone(self) -> nn.Module:
-        return BackboneOnly(self.__backbone)
+        return self.__backbone
     
     @property
     def binary_head(self) -> nn.Module:

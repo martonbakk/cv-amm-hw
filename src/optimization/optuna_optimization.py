@@ -1,16 +1,18 @@
 import os
 import yaml
 import optuna
+import torch
+import logging
 from optuna.pruners import MedianPruner
 from optuna.samplers import TPESampler
+
+                
 from src.data_loader.data_loader import DataLoader
 from src.model.model import TwoHeadConvNeXtV2
 from src.model.utils import train_model
-import logging
-from src.config.configuration import CLASS_NUM, EPOCHS_PHASE1, EPOCHS_PHASE2, NUM_AUGMENTATIONS
+from src.config.configuration import CLASS_NUM, EPOCHS_PHASE1, EPOCHS_PHASE2, NUM_AUGMENTATIONS, OPTUNA_PHASE1_EPOCHS, OPTUNA_PHASE2_EPOCHS
 from src.data_loader.augmentation import Augmentor
-import torch
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 
 
 def run_optuna_tuning(
@@ -91,7 +93,7 @@ def run_optuna_tuning(
     final_model = TwoHeadConvNeXtV2(
         num_multi_classes=CLASS_NUM,
         dropout=best_trial.params["dropout"]
-    ).to(DEVICE)
+    )
     
     final_augmentor = Augmentor(
         num_augmentations=NUM_AUGMENTATIONS,
@@ -125,15 +127,18 @@ def objective(trial: optuna.Trial, data_loader: DataLoader):
     lr_heads = trial.suggest_float("lr_heads", 1e-5, 1e-2, log=True)
     lr_backbone = trial.suggest_float("lr_backbone", 1e-6, 1e-4, log=True)
     weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-2, log=True)
-    center_n_transforms = trial.suggest_int("center_n_transforms", 1, 5)
-    center_magnitude = trial.suggest_int("center_magnitude", 5, 20)
-    dropout = trial.suggest_float("dropout", 0.1, 0.5)
+    augmentation_strength = trial.suggest_int("augmentation_strength", 1, 5)
+    label_smoothing = trial.suggest_float("label_smoothing", 0.0, 0.2)
+
+    center_n_transforms = augmentation_strength
+    center_magnitude = augmentation_strength * 5
 
     # Create model
     model = TwoHeadConvNeXtV2(
+        backbone_name="convnextv2_atto.fcmae",
         num_multi_classes=CLASS_NUM,
-        dropout=dropout
-    ).to(DEVICE)
+        dropout=0.2
+    )
 
     # Create augmentor with reduced samples for tuning
     augmentor = Augmentor(
@@ -150,8 +155,9 @@ def objective(trial: optuna.Trial, data_loader: DataLoader):
         lr_heads=lr_heads,
         lr_backbone=lr_backbone,
         weight_decay=weight_decay,
-        epochs_phase1=3,   # Reduced for tuning
-        epochs_phase2=6,   # Reduced for tuning
+        label_smoothing=label_smoothing,
+        epochs_phase1=OPTUNA_PHASE1_EPOCHS,   # Reduced for tuning
+        epochs_phase2=OPTUNA_PHASE2_EPOCHS,   # Reduced for tuning
         save_models=False,
         trial=trial
     )
