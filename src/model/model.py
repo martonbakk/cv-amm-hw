@@ -14,7 +14,7 @@ class TwoHeadConvNeXtV2(nn.Module):
         backbone_name: str = MODEL_NAME,
         pretrained: bool = True,
         num_multi_classes: int = CLASS_NUM,
-        dropout: float = 0.2,
+        dropout: float = 0.1,
     ):
         super().__init__()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -45,7 +45,10 @@ class TwoHeadConvNeXtV2(nn.Module):
 
         self.__binary_head: nn.Sequential = (
             nn.Sequential(
-                nn.Linear(self.feature_dim, 256),
+                nn.Linear(self.feature_dim, 512),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(512, 256),
                 nn.ReLU(),
                 nn.Dropout(dropout),
                 nn.Linear(256, 1),  # 1 logit
@@ -56,16 +59,16 @@ class TwoHeadConvNeXtV2(nn.Module):
 
         self.__multi_head: nn.Sequential = (
             nn.Sequential(
-                nn.Linear(self.feature_dim, 1024),
+                nn.Linear(self.feature_dim, 512),
                 nn.ReLU(),
-                nn.Dropout(0.4),
-                nn.Linear(1024, 512),
+                nn.Dropout(dropout),
+                nn.Linear(512, 512),
                 nn.ReLU(),
-                nn.Dropout(0.4),
+                nn.Dropout(dropout),
                 nn.Linear(512, 256),
                 nn.ReLU(),
-                nn.Dropout(0.4),
-                nn.Linear(256, CLASS_NUM),
+                nn.Dropout(dropout),
+                nn.Linear(256, num_multi_classes),
             )
             .to(self.device)
             .apply(init_head_weights)
