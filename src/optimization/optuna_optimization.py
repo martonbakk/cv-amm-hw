@@ -1,4 +1,5 @@
 import os
+from typing import Union
 import yaml
 import optuna
 import torch
@@ -28,7 +29,7 @@ def run_optuna_tuning(
     output_dir: str = ".",
     study_name: str = "snake_optimization",
     seed: int = 42,
-    full_train_epochs: tuple = (EPOCHS_PHASE1, EPOCHS_PHASE2),
+    full_train_epochs: Union[tuple, None] = (EPOCHS_PHASE1, EPOCHS_PHASE2),
 ):
     """
     Runs full hyperparameter optimization pipeline with Optuna
@@ -91,14 +92,17 @@ def run_optuna_tuning(
     # Train final model with best parameters
     logging.info("\nTraining final model with best parameters...")
     final_model = TwoHeadConvNeXtV2(
-        num_multi_classes=CLASS_NUM, dropout=best_trial.params["dropout"]
+        num_multi_classes=CLASS_NUM, dropout=0.2
     )
 
     final_augmentor = Augmentor(
         num_augmentations=NUM_AUGMENTATIONS,
-        center_n_transforms=best_trial.params["center_n_transforms"],
-        center_magnitude=best_trial.params["center_magnitude"],
+        center_n_transforms=best_trial.params["augmentation_strength"],
+        center_magnitude=best_trial.params["augmentation_strength"] * 5,
     )
+    if full_train_epochs is None:
+        logging.info("Full training epochs not provided, skipping final training.")
+        return
 
     # Run full training with best parameters
     train_model(

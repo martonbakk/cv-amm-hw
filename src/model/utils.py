@@ -25,7 +25,8 @@ from src.config.configuration import (
     LR_BACKBONE,
     LR_HEADS_BIN,
     LR_HEADS_MULTI,
-    BATCH_SIZE,
+    BATCH_SIZE_PHASE_1,
+    BATCH_SIZE_PHASE_2,
     OPTUNA_SUBSAMPLE_SIZE_TRAIN,
     OPTUNA_SUBSAMPLE_SIZE_VAL,
     WEIGHT_DECAY,
@@ -100,6 +101,7 @@ def create_torch_loader(samples, batch_size, shuffle) -> TorchDataLoader:
         num_workers=NUM_WORKERS,
         pin_memory=True,  # Enable pinned memory for faster GPU transfer
         collate_fn=Collate(IMAGE_ROOT),
+        persistent_workers=True,
     )
 
 
@@ -145,10 +147,10 @@ def train_model(
         logging.info("Optuna tuning: Using reduced dataset for faster training")
 
     train_loader: TorchDataLoader = create_torch_loader(
-        train_samples, BATCH_SIZE, shuffle=True
+        train_samples, BATCH_SIZE_PHASE_1, shuffle=True
     )
     val_loader: TorchDataLoader = create_torch_loader(
-        val_samples, BATCH_SIZE, shuffle=False
+        val_samples, BATCH_SIZE_PHASE_1, shuffle=False
     )
 
     logging.info("PHASE 1: Training only the heads (backbone frozen)")
@@ -187,6 +189,13 @@ def train_model(
         start_epoch_offset=0,
     )
 
+    train_loader: TorchDataLoader = create_torch_loader(
+        train_samples, BATCH_SIZE_PHASE_2, shuffle=True
+    )
+    val_loader: TorchDataLoader = create_torch_loader(
+        val_samples, BATCH_SIZE_PHASE_2, shuffle=False
+    )
+
     logging.info("=== PHASE 2: Full model fine-tuning ===")
     model.unfreeze_backbone()
     best_val_loss = float("inf")
@@ -213,7 +222,7 @@ def train_model(
         epochs=epochs_phase2,
         save_models=save_models,
         trial=trial,
-        start_epoch_offset=0,
+        start_epoch_offset=epochs_phase1
     )
     return best_val_loss
 
@@ -275,10 +284,11 @@ def run_training_phase_heads(
             f"ValLoss {val_loss:.4f} | BinAcc {val_bin_acc:.2f}% | MultiAcc {val_sp_acc:.2f}%"
         )
 
-        if save_models and val_loss < best_val_loss:
+        if val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save(model.state_dict(), "phase1_best.pth")
-            logging.info("New best model saved!")
+            if save_models:
+                torch.save(model.state_dict(), "phase1_best.pth")
+                logging.info("New best model saved!")
 
         if trial:
             trial.report(val_loss, start_epoch_offset + epoch)
@@ -336,10 +346,11 @@ def run_training_phase_full(
             f"ValLoss {val_loss:.4f} | BinAcc {val_bin_acc:.2f}% | MultiAcc {val_sp_acc:.2f}%"
         )
 
-        if save_models and val_loss < best_val_loss:
+        if val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save(model.state_dict(), "phase2_best.pth")
-            logging.info("New best model saved!")
+            if save_models:
+                torch.save(model.state_dict(), "phase2_best.pth")
+                logging.info("New best model saved!")
 
         if trial:
             trial.report(val_loss, start_epoch_offset + epoch)

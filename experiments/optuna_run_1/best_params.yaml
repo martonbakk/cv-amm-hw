@@ -1,0 +1,6 @@
+augmentation_strength: 2
+label_smoothing: 0.0008937373815163206
+lr_backbone: 1.3540985456900546e-05
+lr_heads_bin: 0.0010052751067266717
+lr_heads_multi: 0.0029492630090754376
+weight_decay: 0.0004698296633455782
