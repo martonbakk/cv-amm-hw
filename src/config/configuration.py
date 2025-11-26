@@ -1,6 +1,6 @@
 DATA_SPLIT = 0.2
 CLASS_NUM = 296
-BATCH_SIZE = 24  # Adjust to your GPU memory (RTX 4090 → 64-96 is fine)
+BATCH_SIZE = 96  # Adjust to your GPU memory (RTX 4090 → 64-96 is fine)
 NUM_WORKERS = 2
 INPUT_SIZE = [224, 224]  # ConvNeXt V2 input size
 
@@ -11,8 +11,8 @@ LR_BACKBONE = 3e-5
 WEIGHT_DECAY = 0.05
 LABEL_SMOOTHING = 0.05
 
-EPOCHS_PHASE1 = 2  # Only the two heads learn (backbone frozen)
-EPOCHS_PHASE2 = 10  # Full model fine-tuning
+EPOCHS_PHASE1 = 15  # Only the two heads learn (backbone frozen)
+EPOCHS_PHASE2 = 40  # Full model fine-tuning
 
 # Total number of augmented samples in the training set
 NUM_AUGMENTATIONS = 50000
@@ -27,4 +27,4 @@ IMAGE_ROOT = "data/train_images_small"  # <-- SET YOUR ACTUAL PATH HERE
 META_CSV = "data/train_images_metadata2.csv"
 LABEL_INFO_CSV = "data/venomous_status_metadata.csv"
 
-MODEL_NAME = "convnextv2_atto.fcmae"  # <-- BACKBONE
+MODEL_NAME = "convnextv2_tiny.fcmae"  # <-- BACKBONE

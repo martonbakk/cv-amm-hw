@@ -9,8 +9,7 @@ from tqdm import tqdm
 import os, sys
 import random
 import numpy as np
-from src.data_loader.data_loader import ListDataset, Sample, basic_transform
-from src.data_loader.augmentation import SnakeAugmentor, Augmentor
+from sklearn.utils.class_weight import compute_class_weight
 from PIL import Image
 import optuna
 from optuna.trial import Trial
@@ -30,11 +29,21 @@ from src.config.configuration import (
     OPTUNA_SUBSAMPLE_SIZE_VAL,
     WEIGHT_DECAY,
     LABEL_SMOOTHING,
+    CLASS_NUM
 )
-
+from src.data_loader.data_loader import ListDataset, Sample, basic_transform
+from src.data_loader.augmentation import SnakeAugmentor, Augmentor
 from src.data_loader.data_loader import DataLoader
 from src.model.model import TwoHeadConvNeXtV2
 
+def get_class_weights(train_samples, num_classes=CLASS_NUM):
+    labels = [s.original_class for s in train_samples]
+    class_weights = compute_class_weight(
+        class_weight='balanced',
+        classes=np.arange(num_classes),
+        y=labels
+    )
+    return torch.tensor(class_weights, dtype=torch.float32)
 
 class Collate:
     """Collate function that handles on-demand augmentation without caching"""
@@ -159,8 +168,11 @@ def train_model(
     optimizer_sp = optim.AdamW(
         model.species_head.parameters(), lr=lr_heads_multi, weight_decay=weight_decay
     )
+    class_weights = get_class_weights(train_samples, num_classes=CLASS_NUM)
+    class_weights = class_weights.to(model.device)
     criterion_bin = nn.BCEWithLogitsLoss()  # binary loss
     criterion_sp = nn.CrossEntropyLoss(
+        weight=class_weights,
         label_smoothing=label_smoothing
     )  # multi-class loss
     scheduler_bin = optim.lr_scheduler.ReduceLROnPlateau(
@@ -251,13 +263,11 @@ def run_training_phase_heads(
                 bin_logit, sp_logit = model(imgs)
                 loss_bin = criterion_bin(bin_logit.squeeze(), ven_lbl)
                 loss_sp = criterion_sp(sp_logit, sp_lbl)
+                loss = loss_bin + loss_sp
 
-            # Backward + optimizer step separately
-            scaler.scale(loss_bin).backward(retain_graph=True)
+            scaler.scale(loss).backward()
+
             scaler.step(optimizer_bin)
-            scaler.update()
-
-            scaler.scale(loss_sp).backward()
             scaler.step(optimizer_sp)
             scaler.update()
 
