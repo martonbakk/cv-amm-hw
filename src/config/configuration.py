@@ -3,7 +3,7 @@ CLASS_NUM = 296
 BATCH_SIZE_1 = 400  # Adjust to your GPU memory (RTX 4090 → 64-96 is fine)
 BATCH_SIZE_2 = 100  # Adjust to your GPU memory (RTX 4090 → 64-96 is fine)
 NUM_WORKERS = 4
-INPUT_SIZE = [224, 224]  # ConvNeXt V2 input size
+INPUT_SIZE = 224
 
 # Learning rates for different phases (follows best practices)
 LR_HEADS_BIN = 1e-3
@@ -12,8 +12,8 @@ LR_BACKBONE = 1.35e-5
 WEIGHT_DECAY = 0.00047
 LABEL_SMOOTHING = 0.0009
 
-EPOCHS_PHASE1 = 15  # Only the two heads learn (backbone frozen)
-EPOCHS_PHASE2 = 50  # Full model fine-tuning
+EPOCHS_PHASE1 = 10  # Only the two heads learn (backbone frozen)
+EPOCHS_PHASE2 = 30  # Full model fine-tuning
 
 # Total number of augmented samples in the training set
 NUM_AUGMENTATIONS = 50000

@@ -57,15 +57,15 @@ class TwoHeadConvNeXtV2(nn.Module):
 
         self.__multi_head: nn.Sequential = (
             nn.Sequential(
-                nn.Linear(self.feature_dim, 512),
+                nn.Linear(self.feature_dim, 1024),
+                nn.BatchNorm1d(1024),
+                nn.ReLU(),
+                nn.Dropout(0.6),
+                nn.Linear(1024, 512),
                 nn.BatchNorm1d(512),
                 nn.ReLU(),
                 nn.Dropout(0.5),
-                nn.Linear(512, 256),
-                nn.BatchNorm1d(256),
-                nn.ReLU(),
-                nn.Dropout(0.5),
-                nn.Linear(256, num_multi_classes)
+                nn.Linear(512, num_multi_classes)
             )
             .to(self.device)
             .apply(init_head_weights)

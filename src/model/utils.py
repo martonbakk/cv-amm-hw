@@ -37,6 +37,15 @@ from src.data_loader.augmentation import SnakeAugmentor, Augmentor
 from src.data_loader.data_loader import DataLoader
 from src.model.model import TwoHeadConvNeXtV2
 
+def get_class_weights(train_samples, num_classes=CLASS_NUM):
+    labels = [s.original_class for s in train_samples]
+    class_weights = compute_class_weight(
+        class_weight='balanced',
+        classes=np.arange(num_classes),
+        y=labels
+    )
+    return torch.tensor(class_weights, dtype=torch.float32)
+
 class Collate:
     """Collate function that handles on-demand augmentation without caching"""
 
@@ -166,10 +175,10 @@ def train_model(
         label_smoothing=label_smoothing
     )  # multi-class loss
     scheduler_bin = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer_bin, patience=3, factor=0.5
+        optimizer_bin, patience=2, factor=0.5
     )  # Must come AFTER the optimizer
     scheduler_sp = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer_sp, patience=3, factor=0.5
+        optimizer_sp, patience=2, factor=0.5
     )  # Must come AFTER the optimizer
     scaler = torch.GradScaler()  # Define gradient scaler for mixed precision
     run_training_phase_heads(
@@ -375,19 +384,35 @@ def create_augmented_samples(
         List[Sample]: List of augmented Sample instances.
     """
     augmented_samples = []
+    rng = np.random.default_rng()
+
+    # Get class weights and convert to sample probabilities
+    class_weights = get_class_weights(train_samples, CLASS_NUM)
+    sample_weights = np.array([
+        class_weights[sample.original_class].item() 
+        for sample in train_samples
+    ])
+    
+    # Convert to sampling probabilities (higher weight = higher probability)
+    sample_probs = sample_weights / sample_weights.sum()
+    logging.info(
+        f"Class-balanced augmentation: "
+        f"Rarest class weight={class_weights.max().item():.1f}, "
+        f"Most common weight={class_weights.min().item():.1f}"
+    )
 
     for _ in range(augmentor.num_augmentations):
-        # Randomly select a source sample
-        source_sample = random.choice(train_samples)
+        # Randomly select a source sample with p based on class weights
+        source_idx = np.random.choice(len(train_samples), p=sample_probs)
+        source_sample = train_samples[source_idx]
 
         # Sample augmentation parameters
-        rng = np.random.default_rng()
         n_t = max(
             0,
             min(
                 round(
                     augmentor.center_n_transforms
-                    + rng.normal(scale=augmentor.center_n_transforms * 0.5)
+                    + rng.normal(scale=augmentor.center_n_transforms * 0.2)
                 ),
                 10,
             ),
@@ -397,7 +422,7 @@ def create_augmented_samples(
             min(
                 round(
                     augmentor.center_magnitude
-                    + rng.normal(scale=augmentor.center_magnitude * 0.5)
+                    + rng.normal(scale=augmentor.center_magnitude * 0.2)
                 ),
                 30,
             ),
