@@ -1,18 +1,19 @@
 DATA_SPLIT = 0.2
 CLASS_NUM = 296
-BATCH_SIZE = 96  # Adjust to your GPU memory (RTX 4090 → 64-96 is fine)
-NUM_WORKERS = 2
+BATCH_SIZE_1 = 400  # Adjust to your GPU memory (RTX 4090 → 64-96 is fine)
+BATCH_SIZE_2 = 100  # Adjust to your GPU memory (RTX 4090 → 64-96 is fine)
+NUM_WORKERS = 4
 INPUT_SIZE = [224, 224]  # ConvNeXt V2 input size
 
 # Learning rates for different phases (follows best practices)
 LR_HEADS_BIN = 1e-3
 LR_HEADS_MULTI = 1e-3
-LR_BACKBONE = 3e-5
-WEIGHT_DECAY = 0.05
-LABEL_SMOOTHING = 0.05
+LR_BACKBONE = 1.35e-5
+WEIGHT_DECAY = 0.00047
+LABEL_SMOOTHING = 0.0009
 
 EPOCHS_PHASE1 = 15  # Only the two heads learn (backbone frozen)
-EPOCHS_PHASE2 = 40  # Full model fine-tuning
+EPOCHS_PHASE2 = 50  # Full model fine-tuning
 
 # Total number of augmented samples in the training set
 NUM_AUGMENTATIONS = 50000
@@ -24,7 +25,7 @@ OPTUNA_SUBSAMPLE_SIZE_TRAIN = 10000  # Sample size during Optuna tuning (for spe
 OPTUNA_SUBSAMPLE_SIZE_VAL = 2000  # Sample size during Optuna tuning (for speed)
 
 IMAGE_ROOT = "data/train_images_small"  # <-- SET YOUR ACTUAL PATH HERE
-META_CSV = "data/train_images_metadata2.csv"
+META_CSV = "data/train_images_metadata.csv"
 LABEL_INFO_CSV = "data/venomous_status_metadata.csv"
 
-MODEL_NAME = "convnextv2_tiny.fcmae"  # <-- BACKBONE
+MODEL_NAME = "convnextv2_atto.fcmae"  # <-- BACKBONE

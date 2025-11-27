@@ -24,7 +24,8 @@ from src.config.configuration import (
     LR_BACKBONE,
     LR_HEADS_BIN,
     LR_HEADS_MULTI,
-    BATCH_SIZE,
+    BATCH_SIZE_1,
+    BATCH_SIZE_2,
     OPTUNA_SUBSAMPLE_SIZE_TRAIN,
     OPTUNA_SUBSAMPLE_SIZE_VAL,
     WEIGHT_DECAY,
@@ -35,15 +36,6 @@ from src.data_loader.data_loader import ListDataset, Sample, basic_transform
 from src.data_loader.augmentation import SnakeAugmentor, Augmentor
 from src.data_loader.data_loader import DataLoader
 from src.model.model import TwoHeadConvNeXtV2
-
-def get_class_weights(train_samples, num_classes=CLASS_NUM):
-    labels = [s.original_class for s in train_samples]
-    class_weights = compute_class_weight(
-        class_weight='balanced',
-        classes=np.arange(num_classes),
-        y=labels
-    )
-    return torch.tensor(class_weights, dtype=torch.float32)
 
 class Collate:
     """Collate function that handles on-demand augmentation without caching"""
@@ -109,6 +101,7 @@ def create_torch_loader(samples, batch_size, shuffle) -> TorchDataLoader:
         num_workers=NUM_WORKERS,
         pin_memory=True,  # Enable pinned memory for faster GPU transfer
         collate_fn=Collate(IMAGE_ROOT),
+        persistent_workers=True
     )
 
 
@@ -154,10 +147,10 @@ def train_model(
         logging.info("Optuna tuning: Using reduced dataset for faster training")
 
     train_loader: TorchDataLoader = create_torch_loader(
-        train_samples, BATCH_SIZE, shuffle=True
+        train_samples, BATCH_SIZE_1, shuffle=True
     )
     val_loader: TorchDataLoader = create_torch_loader(
-        val_samples, BATCH_SIZE, shuffle=False
+        val_samples, BATCH_SIZE_1, shuffle=False
     )
 
     logging.info("PHASE 1: Training only the heads (backbone frozen)")
@@ -168,11 +161,8 @@ def train_model(
     optimizer_sp = optim.AdamW(
         model.species_head.parameters(), lr=lr_heads_multi, weight_decay=weight_decay
     )
-    class_weights = get_class_weights(train_samples, num_classes=CLASS_NUM)
-    class_weights = class_weights.to(model.device)
     criterion_bin = nn.BCEWithLogitsLoss()  # binary loss
     criterion_sp = nn.CrossEntropyLoss(
-        weight=class_weights,
         label_smoothing=label_smoothing
     )  # multi-class loss
     scheduler_bin = optim.lr_scheduler.ReduceLROnPlateau(
@@ -197,6 +187,13 @@ def train_model(
         save_models=save_models,
         trial=trial,
         start_epoch_offset=0,
+    )
+
+    train_loader: TorchDataLoader = create_torch_loader(
+        train_samples, BATCH_SIZE_2, shuffle=True
+    )
+    val_loader: TorchDataLoader = create_torch_loader(
+        val_samples, BATCH_SIZE_2, shuffle=False
     )
 
     logging.info("=== PHASE 2: Full model fine-tuning ===")
@@ -267,6 +264,8 @@ def run_training_phase_heads(
 
             scaler.scale(loss).backward()
 
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
             scaler.step(optimizer_bin)
             scaler.step(optimizer_sp)
             scaler.update()
@@ -331,6 +330,9 @@ def run_training_phase_full(
                 loss = loss_bin + loss_sp
 
             scaler.scale(loss).backward()
+
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
             scaler.step(optimizer)
             scaler.update()
 
