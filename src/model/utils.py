@@ -267,7 +267,7 @@ def run_training_phase_heads(
             optimizer_sp.zero_grad()
             with torch.autocast(device_type=model.device.type):
                 bin_logit, sp_logit = model(imgs)
-                loss_bin = criterion_bin(bin_logit.squeeze(), ven_lbl)
+                loss_bin = criterion_bin(bin_logit, ven_lbl)
                 loss_sp = criterion_sp(sp_logit, sp_lbl)
                 loss = loss_bin + loss_sp
 
@@ -334,7 +334,7 @@ def run_training_phase_full(
             optimizer.zero_grad()
             with torch.autocast(device_type=model.device.type):
                 bin_logit, sp_logit = model(imgs)
-                loss_bin = criterion_bin(bin_logit.squeeze(), ven_lbl)
+                loss_bin = criterion_bin(bin_logit, ven_lbl)
                 loss_sp = criterion_sp(sp_logit, sp_lbl)
                 loss = loss_bin + loss_sp
 
@@ -467,7 +467,7 @@ def validate(model, val_loader, crit_bin, crit_sp):
             device_type=model.device.type
         ):  # Cast logits to FP32 for accurate metrics
             bin_logit, sp_logit = model(imgs)
-            loss_bin = crit_bin(bin_logit.squeeze(), ven_lbl)
+            loss_bin = crit_bin(bin_logit, ven_lbl)
             loss_sp = crit_sp(sp_logit, sp_lbl)
             loss = loss_bin + loss_sp
 
