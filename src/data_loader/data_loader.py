@@ -13,13 +13,14 @@ from sklearn.model_selection import train_test_split
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from src.config.configuration import DATA_SPLIT
+from src.config.configuration import DATA_SPLIT, INPUT_SIZE
 
 
 # Simple resize to 224×224 + ToTensor + normalization (same for train and val!)
 basic_transform: transforms.Compose = transforms.Compose(
     [
-        transforms.Resize((224, 224)),  # ConvNeXtV2 expects 224×224
+        transforms.Resize(INPUT_SIZE),
+        transforms.CenterCrop(INPUT_SIZE),
         transforms.ToTensor(),  # [H, W, C] → [C, H, W] + 0-1 float
         transforms.Normalize(  # ImageNet stats
             mean=[0.485, 0.456, 0.406],
