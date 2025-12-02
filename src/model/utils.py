@@ -43,6 +43,14 @@ from src.data_loader.augmentation import SnakeAugmentor, Augmentor
 from src.data_loader.data_loader import DataLoader
 from src.model.model import TwoHeadConvNeXtV2
 
+def get_class_weights(train_samples, num_classes=CLASS_NUM):
+    labels = [s.original_class for s in train_samples]
+    class_weights = compute_class_weight(
+        class_weight='balanced',
+        classes=np.arange(num_classes),
+        y=labels
+    )
+    return torch.tensor(class_weights, dtype=torch.float32)
 
 def get_class_weights(train_samples, num_classes=CLASS_NUM):
     labels = [s.original_class for s in train_samples]
@@ -176,8 +184,11 @@ def train_model(
     optimizer_sp = optim.AdamW(
         model.species_head.parameters(), lr=lr_heads_multi, weight_decay=weight_decay
     )
+    class_weights = get_class_weights(train_samples, num_classes=CLASS_NUM)
+    class_weights = class_weights.to(model.device)
     criterion_bin = nn.BCEWithLogitsLoss()  # binary loss
     criterion_sp = nn.CrossEntropyLoss(
+        weight=class_weights,
         label_smoothing=label_smoothing
     )  # multi-class loss
     scheduler_bin = optim.lr_scheduler.ReduceLROnPlateau(
