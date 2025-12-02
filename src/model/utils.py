@@ -13,6 +13,12 @@ from sklearn.utils.class_weight import compute_class_weight
 from PIL import Image
 import optuna
 from optuna.trial import Trial
+from sklearn.metrics import f1_score, accuracy_score, confusion_matrix
+from typing import Tuple, Dict, List
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np
+from matplotlib.patches import Rectangle
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
@@ -30,21 +36,21 @@ from src.config.configuration import (
     OPTUNA_SUBSAMPLE_SIZE_VAL,
     WEIGHT_DECAY,
     LABEL_SMOOTHING,
-    CLASS_NUM
+    CLASS_NUM,
 )
 from src.data_loader.data_loader import ListDataset, Sample, basic_transform
 from src.data_loader.augmentation import SnakeAugmentor, Augmentor
 from src.data_loader.data_loader import DataLoader
 from src.model.model import TwoHeadConvNeXtV2
 
+
 def get_class_weights(train_samples, num_classes=CLASS_NUM):
     labels = [s.original_class for s in train_samples]
     class_weights = compute_class_weight(
-        class_weight='balanced',
-        classes=np.arange(num_classes),
-        y=labels
+        class_weight="balanced", classes=np.arange(num_classes), y=labels
     )
     return torch.tensor(class_weights, dtype=torch.float32)
+
 
 class Collate:
     """Collate function that handles on-demand augmentation without caching"""
@@ -110,7 +116,7 @@ def create_torch_loader(samples, batch_size, shuffle) -> TorchDataLoader:
         num_workers=NUM_WORKERS,
         pin_memory=True,  # Enable pinned memory for faster GPU transfer
         collate_fn=Collate(IMAGE_ROOT),
-        persistent_workers=True
+        persistent_workers=True,
     )
 
 
@@ -205,7 +211,7 @@ def train_model(
         val_samples, BATCH_SIZE_2, shuffle=False
     )
 
-    logging.info("=== PHASE 2: Full model fine-tuning ===")
+    logging.info("PHASE 2: Full model fine-tuning")
     model.unfreeze_backbone()
     best_val_loss = float("inf")
     optimizer = optim.AdamW(
@@ -388,11 +394,10 @@ def create_augmented_samples(
 
     # Get class weights and convert to sample probabilities
     class_weights = get_class_weights(train_samples, CLASS_NUM)
-    sample_weights = np.array([
-        class_weights[sample.original_class].item() 
-        for sample in train_samples
-    ])
-    
+    sample_weights = np.array(
+        [class_weights[sample.original_class].item() for sample in train_samples]
+    )
+
     # Convert to sampling probabilities (higher weight = higher probability)
     sample_probs = sample_weights / sample_weights.sum()
     logging.info(
@@ -453,8 +458,12 @@ def create_augmented_samples(
 
 
 @torch.no_grad()
-def validate(model, val_loader, crit_bin, crit_sp):
-    model.eval()
+def validate(
+    model: TwoHeadConvNeXtV2,
+    val_loader: TorchDataLoader,
+    crit_bin: torch.nn.Module,
+    crit_sp: torch.nn.Module,
+) -> Tuple[float, float, float]:
     total_loss = 0.0
     bin_acc = sp_acc = 0.0
 
@@ -483,3 +492,177 @@ def validate(model, val_loader, crit_bin, crit_sp):
         bin_acc / len(val_loader),
         sp_acc / len(val_loader),
     )
+
+
+@torch.no_grad()
+def format_pred(
+    model: TwoHeadConvNeXtV2, data_loader: TorchDataLoader
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+
+    model.eval()
+
+    all_venom_true = []
+    all_venom_pred = []
+    all_species_true = []
+    all_species_pred = []
+
+    pbar = tqdm(data_loader, desc="Running Inference")
+
+    for imgs, ven_lbl, sp_lbl in pbar:
+        imgs = imgs.to(model.device, non_blocking=True)
+
+        with torch.autocast(device_type=model.device.type):
+            bin_logits, sp_logits = model(imgs)
+
+        preds_bin = torch.sigmoid(bin_logits).round().cpu().numpy()
+
+        preds_species = torch.argmax(sp_logits, dim=1).cpu().numpy()
+
+        all_venom_true.extend(ven_lbl.numpy())
+        all_venom_pred.extend(preds_bin)
+        all_species_true.extend(sp_lbl.numpy())
+        all_species_pred.extend(preds_species)
+
+    return (
+        np.array(all_venom_true),
+        np.array(all_venom_pred),
+        np.array(all_species_true),
+        np.array(all_species_pred),
+    )
+
+
+def compute_performance_metrics(
+    venom_true: np.ndarray,
+    venom_pred: np.ndarray,
+    species_true: np.ndarray,
+    species_pred: np.ndarray,
+) -> Dict[str, float | int | np.ndarray]:
+    # Macro Averaged F1 (Species)
+    f1_macro = float(f1_score(species_true, species_pred, average="macro"))
+
+    # Accuracy (Species)
+    acc_species = float(accuracy_score(species_true, species_pred))
+
+    # Binary Accuracy (Venomous accuracy)
+    acc_binary = float(accuracy_score(venom_true, venom_pred))
+
+    # Venomous Mistake Stats (Confusion Matrix)
+    try:
+        tn, fp, fn, tp = confusion_matrix(venom_true, venom_pred).ravel()
+        tn, fp, fn, tp = int(tn), int(fp), int(fn), int(tp)
+    except ValueError:
+        # Fallback if batch contains only one class
+        tn, fp, fn, tp = 0, 0, 0, 0
+
+    return {
+        "acc_species": acc_species,
+        "f1_macro": f1_macro,
+        "acc_binary": acc_binary,
+        "venom_true_pos": int(tp),
+        "venom_true_neg": int(tn),
+        "venom_false_pos": int(fp),
+        "venom_false_neg": int(fn),
+    }
+
+
+def full_evaluation(
+    model: TwoHeadConvNeXtV2, data_loader: DataLoader
+) -> Dict[str, float | np.ndarray | int]:
+    """
+    Wrapper function to run inference and calculate metrics in one go.
+    """
+    val_loader = create_torch_loader(
+        data_loader.get_validation_set(), BATCH_SIZE_2, shuffle=False
+    )
+
+    v_true, v_pred, s_true, s_pred = format_pred(model, val_loader)
+
+    metrics = compute_performance_metrics(v_true, v_pred, s_true, s_pred)
+
+    logging.info("EVALUATION RESULTS")
+    logging.info(f"Species Macro F1: {metrics['f1_macro']:.4f}")
+    logging.info(f"Species Accuracy: {metrics['acc_species']:.4f}")
+    logging.info(f"Venom Binary Acc: {metrics['acc_binary']:.4f}")
+    logging.info(f"Venom Mistakes (FN - Dangerous): {metrics['venom_false_neg']}")
+
+    return metrics
+
+
+def plot_snake_metrics(metrics):
+    sns.set_style("whitegrid")
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+
+    metric_names = ["Species Accuracy", "Macro F1", "Venom Accuracy"]
+    metric_values = [metrics["acc_species"], metrics["f1_macro"], metrics["acc_binary"]]
+    colors = ["#3498db", "#2ecc71", "#e74c3c"]
+
+    bars = ax1.bar(metric_names, metric_values, color=colors, alpha=0.8)
+
+    ax1.set_ylim(0, 1.1)
+    ax1.set_title("Modell Általános Teljesítménye", fontsize=14, fontweight="bold")
+    ax1.set_ylabel("Érték (0-1)", fontsize=12)
+
+    for bar in bars:
+        height = bar.get_height()
+        ax1.text(
+            bar.get_x() + bar.get_width() / 2.0,
+            height + 0.02,
+            f"{height:.2%}",
+            ha="center",
+            va="bottom",
+            fontsize=12,
+            fontweight="bold",
+        )
+
+    cm = np.array(
+        [
+            [metrics["venom_true_neg"], metrics["venom_false_pos"]],
+            [metrics["venom_false_neg"], metrics["venom_true_pos"]],
+        ]
+    )
+
+    group_names = [
+        "TN\n(Helyes Ártalmatlan)",
+        "FP\n(Téves Riasztás)",
+        "FN\n(VESZÉLYES HIBA!)",
+        "TP\n(Helyes Mérges)",
+    ]
+
+    group_counts = [f"{value:0.0f}" for value in cm.flatten()]
+
+    row_sums = cm.sum(axis=1, keepdims=True)
+
+    row_sums[row_sums == 0] = 1
+    percentages = cm / row_sums
+    group_percentages = [f"({value:.1%})" for value in percentages.flatten()]
+
+    labels = [
+        f"{v1}\n{v2}\n{v3}"
+        for v1, v2, v3 in zip(group_names, group_counts, group_percentages)
+    ]
+    labels = np.asarray(labels).reshape(2, 2)
+
+    sns.heatmap(
+        cm,
+        annot=labels,
+        fmt="",
+        cmap="Blues",
+        cbar=False,
+        ax=ax2,
+        annot_kws={"fontsize": 11, "fontweight": "bold"},
+        square=True,
+    )
+
+    ax2.set_xlabel("Modell Tippje", fontsize=12)
+    ax2.set_ylabel("Valóság", fontsize=12)
+    ax2.set_xticklabels(["Ártalmatlan", "Mérges"])
+    ax2.set_yticklabels(["Ártalmatlan", "Mérges"])
+    ax2.set_title(
+        "Mérgesség Detektálás (Konfúziós Mátrix)", fontsize=14, fontweight="bold"
+    )
+
+    rect = Rectangle((0, 1), 1, 1, fill=False, edgecolor="red", lw=4, clip_on=False)
+    ax2.add_patch(rect)
+
+    plt.tight_layout()
+    plt.show()

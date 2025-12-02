@@ -7,3 +7,4 @@ data/train_images_*/
 data/test_images_*/
 .pth
 .zip
+experiments/
