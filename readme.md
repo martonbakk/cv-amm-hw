@@ -4,7 +4,6 @@
 ![Architecture](https://img.shields.io/badge/Model-ConvNeXt%20V2-green?style=flat)
 ![Optimization](https://img.shields.io/badge/Tuning-Optuna-orange?style=flat)
 ![CUDA](https://img.shields.io/badge/CUDA-Enabled-76B900?style=flat&logo=nvidia)
-![Conda](https://img.shields.io/badge/Conda-Environment-44A833?style=flat&logo=anaconda)
 
 Computer Vision pipeline designed to perform **fine-grained image classification** on snake species and determine their venomous status.
 
